@@ -1,3 +1,4 @@
+# how to get a container
 1. 启动container
 sudo docker run -it \
   --gpus all \
