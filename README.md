@@ -73,3 +73,7 @@ PY
     `scp sb3.tar ac@10.86.96.6:/home/ac/data/` or `rsync -avzP sb3.tar ac@10.86.96.6:/home/ac/data/`
   c. load docker image
     `docker load -i /home/ac/data/sb3.tar`
+
+
+# pull
+1. git add __pycache__ dubins_env __init__.py README.md train_ddpg.py
