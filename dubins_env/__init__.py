@@ -8,14 +8,14 @@ register(
     kwargs=dict(
         L=1.0,
         dt=0.1,
-        v_max=1.5,
-        v_min=0.0,
+        v_max=3.0,
+        v_min=0.1,
         steer_max=0.6,       # ≈34°
-        allow_reverse=False, # 需要倒车就改 True
+        allow_reverse=True, # 需要倒车就改 True
         goal_tol=0.15,
         max_episode_steps=600,
-        w_dist=5,
-        w_yaw=1.0,
+        w_dist=25,
+        w_yaw=6,
         w_u_v=5e-4,
         w_u_steer=1e-3,
         w_goal=50.0,
@@ -27,8 +27,8 @@ register(
         # ---- 新增避障相关参数 ----
         obstacle_center=(0.0, 0.0),
         obstacle_radius=1.0,
-        safe_margin=0.2,
-        w_obs_shaping=0.5,
+        safe_margin=0.3,
+        w_obs_shaping=2,
         w_collision=100.0,
     ),
 )
