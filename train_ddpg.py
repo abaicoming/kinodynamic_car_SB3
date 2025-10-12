@@ -29,7 +29,7 @@ Algo = DDPG if ALG == "DDPG" else TD3
 
 # 统一日志/模型目录
 # LOG_DIR = "/workspace/kinodynamic_car_SB3/backup/absolute_with_sin_cos_repair_plot_arrow_backup_python"
-LOG_DIR = "/workspace/kinodynamic_car_SB3/backup/with_obstacle_avoidance_v4/notallow_reverse"
+LOG_DIR = "/workspace/kinodynamic_car_SB3/backup/with_obstacle_avoidance_v4/notallow_reverse/change_reward"
 PLOT_DIR = os.path.join(LOG_DIR, "plots")
 os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(PLOT_DIR, exist_ok=True)
@@ -118,7 +118,7 @@ total_steps = 200_000
 # 训练时加上 callback
 model.learn(total_timesteps=total_steps, log_interval=10, callback=eval_callback)
 t1 = time.time()
-print(f"[train] done in {(t1 - t0:.1f)/60}mins{(t1 - t0:.1f)%60}s")
+print(f"[train] done in {(t1 - t0)/60}mins{(t1 - t0)%60}s")
 # 统一保存到 LOG_DIR
 model_path = os.path.join(LOG_DIR, f"{ALG}_kinematic_model")
 vecnorm_path = os.path.join(LOG_DIR, f"{ALG}_vecnorm.pkl")
