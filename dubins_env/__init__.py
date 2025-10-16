@@ -10,18 +10,19 @@ register(
         dt=0.1,
         v_max=3.0,
         v_min=0.1,
-        steer_max=0.6,       # ≈34°
+        steer_max=1.2,       # 0.6 rad ≈ 34°
         allow_reverse=True, # 需要倒车就改 True
-        goal_tol=0.15,
-        max_episode_steps=600,
-        w_dist=25,
-        w_yaw=6,
+        goal_tol= 0.15,         # 位置容差（米）
+        yaw_tol= 1.2,          # 朝向容差（弧度）
+        max_episode_steps=800,
+        w_dist=100,
+        w_yaw=4,
         w_u_v=5e-4,
         w_u_steer=1e-3,
-        w_goal=50.0,
+        w_goal=200.0,
         xy_range=(-6.0, 6.0),
         goal_xy_range=(-6.0, 6.0),
-        min_start_goal_dist=1.5,
+        min_start_goal_dist=0.1,
         obs_noise_std=0.0,
         render_mode=None,
         # ---- 新增避障相关参数 ----

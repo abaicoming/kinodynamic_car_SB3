@@ -41,7 +41,8 @@ class KinematicCarEnv(gym.Env):
         steer_max: float = 0.6,        # ≈34.4°，前轮最大转角（弧度）
         allow_reverse: bool = False,   # 是否允许倒车（u0<0）
         # 任务设置
-        goal_tol: float = 0.15,
+        goal_tol: float = 0.15,         # 位置容差（米）
+        yaw_tol: float = 0.25,          # 朝向容差（弧度，~14°）
         max_episode_steps: int = 500,
         # 奖励权重
         w_dist: float = 1.0,
@@ -77,6 +78,7 @@ class KinematicCarEnv(gym.Env):
         self.allow_reverse = bool(allow_reverse)
 
         self.goal_tol = float(goal_tol)
+        self.yaw_tol  = float(yaw_tol)
         self.max_episode_steps = int(max_episode_steps)
 
         self.w_dist = float(w_dist)
@@ -151,9 +153,22 @@ class KinematicCarEnv(gym.Env):
         return float(x), float(y), float(th)
 
     def _goal_reached(self) -> bool:
+        x, y, th = self.state
+        xg, yg, thg = self.goal
+        pos_ok = math.hypot(xg - x, yg - y) < self.goal_tol
+        yaw_ok = abs(wrap_angle(thg - th)) < self.yaw_tol
+        return bool(pos_ok and yaw_ok)
+    
+    # 如需单独判定
+    def _goal_pos_ok(self) -> bool:
         x, y, _ = self.state
         xg, yg, _ = self.goal
         return math.hypot(xg - x, yg - y) < self.goal_tol
+
+    def _goal_yaw_ok(self) -> bool:
+        _, _, th = self.state
+        _, _, thg = self.goal
+        return abs(wrap_angle(thg - th)) < self.yaw_tol
 
     def _distance_and_heading(self):
         x, y, th = self.state
@@ -281,6 +296,8 @@ class KinematicCarEnv(gym.Env):
         reward += shaping
         
         # ---- 终止条件 ----
+        pos_ok = self._goal_pos_ok()
+        yaw_ok = self._goal_yaw_ok()
         is_goal = self._goal_reached()
         is_collision = self._collided()
 
@@ -305,6 +322,9 @@ class KinematicCarEnv(gym.Env):
             "u1": u1,
             "is_success": bool(is_goal),  # 便于外部统计“到达率”
             "success": bool(is_goal),  # 兼容两种键名，稳妥！
+            "pos_ok": pos_ok,              # 细粒度：只位置到达？
+            "yaw_ok": yaw_ok,              # 细粒度：只朝向到达？
+            "is_collision": is_collision,  # 方便调试看失败原因
             "state": state_tuple,      # 每一步状态
         }
             

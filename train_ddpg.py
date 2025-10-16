@@ -27,7 +27,7 @@ ALG = "DDPG"            # or "TD3"
 Algo = DDPG if ALG == "DDPG" else TD3
 N_ENVS = 24             # 并行环境个数，按CPU核数设置 8~16
 EVAL_ENVS = 8           # 评估并行环境个数
-TOTAL_STEPS = 200_000
+TOTAL_STEPS = 250_000
 
 # ----------------  备份源码（环境包 + 本脚本）----------------
 def backup_sources(log_dir: str):
@@ -82,7 +82,8 @@ def main():
     os.environ.setdefault("MKL_NUM_THREADS", "1")
 
     # ---- 日志目录 ----
-    LOG_DIR = "/workspace/kinodynamic_car_SB3/backup/with_obstacle_avoidance_v5/allow_reverse/w_yaw_6"
+    LOG_DIR = "/workspace/kinodynamic_car_SB3/backup/with_obstacle_avoidance_v7/0"
+    # allow_reverse,w_obs_shaping=2,w_dist=100,w_yaw=4,batchsize=512,min_start_goal_dist=0.1
     PLOT_DIR = os.path.join(LOG_DIR, "plots")
     os.makedirs(LOG_DIR, exist_ok=True)
     os.makedirs(PLOT_DIR, exist_ok=True)
@@ -113,8 +114,8 @@ def main():
         device="cuda" if torch.cuda.is_available() else "cpu",
         learning_rate=3e-4,
         buffer_size=400_000,
-        learning_starts=5_000,
-        batch_size=256,
+        learning_starts=10_000,
+        batch_size=512,
         tau=0.005,
         gamma=0.99,
         train_freq=1,
@@ -123,7 +124,7 @@ def main():
         tensorboard_log=LOG_DIR,
         seed=SEED,
         verbose=1,
-        policy_kwargs=dict(net_arch=dict(pi=[256, 256, 256, 256], qf=[256, 256, 256, 256])),
+        policy_kwargs=dict(net_arch=dict(pi=[256, 256, 256, 256, 256, 256], qf=[256, 256, 256, 256, 256, 256])),
     )
 
     # ---- 评估环境（并行）+ 回调 ----
@@ -173,7 +174,7 @@ def main():
     loaded = Algo.load(model_path, device=("cuda" if torch.cuda.is_available() else "cpu"))
     base_env = traj_venv.venv.envs[0].unwrapped
 
-    def rollout_one_episode(max_steps=1200):
+    def rollout_one_episode(max_steps=400):
         """返回 (xs, ys, ths, start_state, goal_state, steps, is_success)"""
         obs = traj_venv.reset()
         start = base_env.state
@@ -208,7 +209,7 @@ def main():
 
         return xs, ys, ths, start, goal, steps, is_success
 
-    N = 8
+    N = 16
     trajectories = []
     succ_cnt = 0
     for _ in range(N):
