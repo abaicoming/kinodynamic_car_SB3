@@ -29,7 +29,7 @@ register(
         obstacle_center=(0.0, 0.0),
         obstacle_radius=1.0,
         safe_margin=0.3,
-        w_obs_shaping=2,
+        w_obs_shaping=10,
         w_collision=100.0,
     ),
 )

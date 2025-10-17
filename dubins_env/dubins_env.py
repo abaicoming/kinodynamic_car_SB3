@@ -13,6 +13,7 @@ def wrap_angle(angle: float) -> float:
     return a
 
 
+
 class KinematicCarEnv(gym.Env):
     """
     二输入小车（u0=线速度, u1=前轮转角）：
@@ -134,6 +135,15 @@ class KinematicCarEnv(gym.Env):
 
         self.np_random, _ = gym.utils.seeding.np_random(None)
 
+    # ---------- External control for next reset ----------
+    def set_start_goal_for_next_reset(self, start=None, goal=None):
+        """
+        设置“下次 reset 生效”的起点/终点。传 None 表示不强制。
+        形如 start=(x, y, theta), goal=(xg, yg, thetag)
+        """
+        self._forced_start = start
+        self._forced_goal = goal
+
     # 到障碍的距离
     def _dist_to_obstacle(self) -> float:
         ox, oy = self.obstacle_center
@@ -213,6 +223,18 @@ class KinematicCarEnv(gym.Env):
         if options is not None:
             start = options.get("start", None)
             goal = options.get("goal", None)
+            
+        # >>> 新增：若调用过 set_start_goal_for_next_reset，则覆盖 options
+        if hasattr(self, "_forced_start") or hasattr(self, "_forced_goal"):
+            fs = getattr(self, "_forced_start", None)
+            fg = getattr(self, "_forced_goal", None)
+            if fs is not None or fg is not None:
+                start = fs if fs is not None else start
+                goal  = fg if fg is not None else goal
+            # 用完就清掉，避免影响后续 reset
+            self._forced_start = None
+            self._forced_goal = None
+        # <<< 新增结束
 
         if start is None or goal is None:
             # 随机采样起点/终点，保证最小间距
