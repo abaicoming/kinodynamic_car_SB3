@@ -1,11 +1,11 @@
 import os
 import time
 import shutil
+import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 import gymnasium as gym
 import torch
-
 from matplotlib.patches import Circle
 
 # ===== SB3 =====
@@ -20,14 +20,14 @@ from stable_baselines3.common.vec_env import sync_envs_normalization
 # 触发环境注册（确保 __init__.py 注册了 KinematicCar-v0）
 import kinodynamic_car_SB3.dubins_env  # noqa: F401
 
-# ========= 全局配置（常量） =========
+# ========= 全局配置（默认值，可被命令行覆盖） =========
 ENV_ID = "KinematicCar-v0"
 SEED = 42
-ALG = "DDPG"            # or "TD3"
+ALG = "DDPG"                 # or "TD3"
 Algo = DDPG if ALG == "DDPG" else TD3
-N_ENVS = 24             # 并行环境个数，按CPU核数设置 8~16
-EVAL_ENVS = 8           # 评估并行环境个数
-TOTAL_STEPS = 250_000
+N_ENVS = 24                  # 并行环境个数
+EVAL_ENVS = 8                # 评估并行环境个数
+TOTAL_STEPS = 300_000
 
 # ----------------  备份源码（环境包 + 本脚本）----------------
 def backup_sources(log_dir: str):
@@ -50,11 +50,12 @@ def backup_sources(log_dir: str):
     except Exception as e:
         print(f"[WARN] copy script failed: {e}")
 
-# ============ VecEnv 工厂函数（可被子进程 picklable） ============
+# ============ VecEnv 工厂函数 ============
+
 def make_env_train(rank: int, log_dir: str):
     def _thunk():
         env = gym.make(ENV_ID)
-        env = Monitor(env, log_dir)           # 训练环境包 Monitor 便于记录
+        env = Monitor(env, log_dir)
         env.reset(seed=SEED + rank)
         return env
     return _thunk
@@ -71,111 +72,38 @@ def make_env_eval():
 
 def make_env_for_traj():
     def _thunk():
-        return Monitor(gym.make(ENV_ID))      # 不用 render_mode，收集坐标后统一绘图
+        return Monitor(gym.make(ENV_ID))
     return _thunk
 
-# ============ 主流程 ============
-def main():
-    # ---- 线程/并行限制（防止每个子进程占满核）----
-    torch.set_num_threads(1)
-    os.environ.setdefault("OMP_NUM_THREADS", "1")
-    os.environ.setdefault("MKL_NUM_THREADS", "1")
+# ============ 轨迹可视化（可单独调用） ============
 
-    # ---- 日志目录 ----
-    LOG_DIR = "/workspace/kinodynamic_car_SB3/backup/with_obstacle_avoidance_v7/0"
-    # allow_reverse,w_obs_shaping=2,w_dist=100,w_yaw=4,batchsize=512,min_start_goal_dist=0.1
-    PLOT_DIR = os.path.join(LOG_DIR, "plots")
-    os.makedirs(LOG_DIR, exist_ok=True)
-    os.makedirs(PLOT_DIR, exist_ok=True)
+def visualize_trajectories(
+    log_dir: str,
+    alg_name: str = ALG,
+    episodes: int = 16,
+    max_steps: int = 400,
+    deterministic: bool = True,
+    title_suffix: str = ""
+):
+    """
+    从 log_dir 读取 <ALG>_kinematic_model 与 <ALG>_vecnorm.pkl，画多条轨迹并保存到 plots/ 下。
+    """
+    model_path = os.path.join(log_dir, f"{alg_name}_kinematic_model")
+    vecnorm_path = os.path.join(log_dir, f"{alg_name}_vecnorm.pkl")
+    plot_dir = os.path.join(log_dir, "plots")
+    os.makedirs(plot_dir, exist_ok=True)
 
-    # ---- 备份源码：只在主进程跑一次 ----
-    backup_sources(LOG_DIR)
-
-    # ---- 动作维度探测 ----
-    tmp = gym.make(ENV_ID)
-    n_actions = tmp.action_space.shape[-1]
-    tmp.close()
-
-    # ---- 并行训练环境 ----
-    venv = SubprocVecEnv([make_env_train(i, LOG_DIR) for i in range(N_ENVS)])
-    venv = VecNormalize(venv, norm_obs=True, norm_reward=True, clip_obs=10.0, gamma=0.99)
-
-    # ---- 动作噪声 ----
-    if n_actions == 2:
-        sigma = np.array([0.5, 0.4], dtype=np.float32)
-    else:
-        sigma = 0.3 * np.ones(n_actions, dtype=np.float32)
-    action_noise = NormalActionNoise(mean=np.zeros(n_actions, dtype=np.float32), sigma=sigma)
-
-    # ---- 模型 ----
-    model = Algo(
-        "MlpPolicy",
-        venv,
-        device="cuda" if torch.cuda.is_available() else "cpu",
-        learning_rate=3e-4,
-        buffer_size=400_000,
-        learning_starts=10_000,
-        batch_size=512,
-        tau=0.005,
-        gamma=0.99,
-        train_freq=1,
-        gradient_steps=1,
-        action_noise=action_noise,
-        tensorboard_log=LOG_DIR,
-        seed=SEED,
-        verbose=1,
-        policy_kwargs=dict(net_arch=dict(pi=[256, 256, 256, 256, 256, 256], qf=[256, 256, 256, 256, 256, 256])),
-    )
-
-    # ---- 评估环境（并行）+ 回调 ----
-    eval_env = SubprocVecEnv([make_env_eval_for_callback(i, LOG_DIR) for i in range(EVAL_ENVS)])
-    eval_env = VecNormalize(eval_env, training=False, norm_obs=True, norm_reward=False)
-    sync_envs_normalization(venv, eval_env)
-
-    eval_callback = EvalCallback(
-        eval_env,
-        best_model_save_path=os.path.join(LOG_DIR, "best"),
-        log_path=LOG_DIR,
-        eval_freq=50_000,
-        n_eval_episodes=100,
-        deterministic=True,
-    )
-
-    # ---- 训练 ----
-    print("[train] start")
-    t0 = time.time()
-    model.learn(total_timesteps=TOTAL_STEPS, log_interval=10, callback=eval_callback)
-    t1 = time.time()
-    mins, secs = divmod(t1 - t0, 60)
-    print(f"[train] done in {int(mins)}m{secs:.1f}s")
-
-    # ---- 保存 ----
-    model_path = os.path.join(LOG_DIR, f"{ALG}_kinematic_model")
-    vecnorm_path = os.path.join(LOG_DIR, f"{ALG}_vecnorm.pkl")
-    model.save(model_path)
-    venv.save(vecnorm_path)
-    print(f"Saved model to: {model_path}")
-    print(f"Saved VecNormalize stats to: {vecnorm_path}")
-
-    # ---- evaluate_policy（单环境 DummyVecEnv）----
-    eval_venv = DummyVecEnv([make_env_eval()])
-    eval_venv = VecNormalize.load(vecnorm_path, eval_venv)
-    eval_venv.training = False
-    eval_venv.norm_reward = False
-    mean_r, std_r = evaluate_policy(model, eval_venv, n_eval_episodes=10, deterministic=True)
-    print(f"[{ALG}] Eval return: {mean_r:.2f} ± {std_r:.2f}")
-
-    # ---- 轨迹可视化（单环境 DummyVecEnv）----
+    # 单环境评估/采样
     traj_venv = DummyVecEnv([make_env_for_traj()])
     traj_venv = VecNormalize.load(vecnorm_path, traj_venv)
     traj_venv.training = False
     traj_venv.norm_reward = False
 
-    loaded = Algo.load(model_path, device=("cuda" if torch.cuda.is_available() else "cpu"))
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    loaded = Algo.load(model_path, device=device)
     base_env = traj_venv.venv.envs[0].unwrapped
 
-    def rollout_one_episode(max_steps=400):
-        """返回 (xs, ys, ths, start_state, goal_state, steps, is_success)"""
+    def rollout_one_episode(max_steps_=max_steps):
         obs = traj_venv.reset()
         start = base_env.state
         goal = base_env.goal
@@ -184,11 +112,10 @@ def main():
         steps = 0
         is_success = False
 
-        for _ in range(max_steps):
-            action, _ = loaded.predict(obs, deterministic=True)
+        for _ in range(max_steps_):
+            action, _ = loaded.predict(obs, deterministic=deterministic)
             obs, rewards, dones, infos = traj_venv.step(action)
             info0 = infos[0]
-
             if dones[0]:
                 term = info0.get("terminal_state", None)
                 if term is not None:
@@ -206,22 +133,22 @@ def main():
                     x, y, th = base_env.state
                     xs.append(x); ys.append(y); ths.append(th)
             steps += 1
-
         return xs, ys, ths, start, goal, steps, is_success
 
-    N = 16
+    # 收集多条轨迹
     trajectories = []
     succ_cnt = 0
-    for _ in range(N):
+    for _ in range(episodes):
         xs, ys, ths, st, gl, steps, ok = rollout_one_episode()
         trajectories.append((xs, ys, ths, st, gl, steps, ok))
         succ_cnt += int(ok)
 
+    # 绘图
     plt.figure(figsize=(7, 7))
     ax = plt.gca()
     colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
 
-    # 画障碍物及安全边
+    # 画障碍物 + 安全圈
     oc = getattr(base_env, "obstacle_center", (0.0, 0.0))
     orad = getattr(base_env, "obstacle_radius", 1.0)
     ax.add_patch(Circle(oc, radius=orad, facecolor="k", edgecolor="k", alpha=0.15, lw=1.0))
@@ -235,7 +162,6 @@ def main():
     for i, (xs, ys, ths, st, gl, steps, ok) in enumerate(trajectories):
         c = colors[i % len(colors)]
         lbl = f"ep{i+1} ({'✓' if ok else '×'}, {steps} steps)"
-
         plt.plot(xs, ys, '-', lw=2, color=c, alpha=0.9, label=lbl)
         plt.plot(xs[0], ys[0], 'o', color=c, ms=6, alpha=0.9)
         plt.plot(gl[0], gl[1], '*', color=c, ms=12, alpha=0.9)
@@ -256,24 +182,156 @@ def main():
                    angles='xy', scale_units='xy', scale=1.0,
                    width=0.004, color=c, alpha=0.7)
 
-    plt.legend()
+    # 放在右侧
+    # plt.legend(
+    #     loc='center left',
+    #     bbox_to_anchor=(1.02, 0.5),   # 把图例锚在图右外侧
+    #     frameon=False,
+    #     fontsize=8
+    # )
+    # plt.tight_layout(rect=[0, 0, 0.85, 1])  # 给右边留空间
+
+    # 放在下方
+    plt.legend(
+        loc='upper center',
+        bbox_to_anchor=(0.5, -0.08),
+        ncol=4,            # 分 4 列横排
+        frameon=False,
+        fontsize=8
+    )
+    plt.tight_layout()
+
     plt.axis('equal'); plt.grid(True, ls='--', alpha=0.5)
     plt.xlabel('x'); plt.ylabel('y')
-    plt.title(f"{ENV_ID} trajectories ({ALG}) | {succ_cnt}/{N} reached")
+    ttl = f"{ENV_ID} trajectories ({ALG}) | {succ_cnt}/{episodes} reached"
+    if title_suffix:
+        ttl += f" | {title_suffix}"
+    plt.title(ttl)
 
     ts = time.strftime("%Y%m%d-%H%M%S")
-    out_path = os.path.join(PLOT_DIR, f"{ALG}_{ENV_ID}_multi_traj_{N}_{ts}.png")
+    out_path = os.path.join(plot_dir, f"{ALG}_{ENV_ID}_multi_traj_{episodes}_{ts}.png")
     plt.savefig(out_path, dpi=180, bbox_inches="tight")
-    print(f"Saved trajectory figure to: {out_path}")
-    # plt.show()
+    print(f"[plot] Saved trajectory figure to: {out_path}")
 
     traj_venv.close()
 
+# ============ 训练主流程 ============
+
+def train_and_optionally_eval(args):
+    # 线程限制
+    torch.set_num_threads(1)
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+
+    LOG_DIR = args.log_dir
+    PLOT_DIR = os.path.join(LOG_DIR, "plots")
+    os.makedirs(LOG_DIR, exist_ok=True)
+    os.makedirs(PLOT_DIR, exist_ok=True)
+
+    backup_sources(LOG_DIR)
+
+    tmp = gym.make(ENV_ID)
+    n_actions = tmp.action_space.shape[-1]
+    tmp.close()
+
+    venv = SubprocVecEnv([make_env_train(i, LOG_DIR) for i in range(args.n_envs)])
+    venv = VecNormalize(venv, norm_obs=True, norm_reward=True, clip_obs=10.0, gamma=0.99)
+
+    sigma = np.array([0.5, 0.4], dtype=np.float32) if n_actions == 2 else 0.3 * np.ones(n_actions, dtype=np.float32)
+    action_noise = NormalActionNoise(mean=np.zeros(n_actions, dtype=np.float32), sigma=sigma)
+
+    model = Algo(
+        "MlpPolicy",
+        venv,
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        learning_rate=3e-4,
+        buffer_size=400_000,
+        learning_starts=10_000,
+        batch_size=512,
+        tau=0.005,
+        gamma=0.99,
+        train_freq=1,
+        gradient_steps=1,
+        action_noise=action_noise,
+        tensorboard_log=LOG_DIR,
+        seed=SEED,
+        verbose=1,
+        policy_kwargs=dict(net_arch=dict(pi=[256, 256, 256, 256, 256, 256],
+                                         qf=[256, 256, 256, 256, 256, 256])),
+    )
+
+    eval_env = SubprocVecEnv([make_env_eval_for_callback(i, LOG_DIR) for i in range(args.eval_envs)])
+    eval_env = VecNormalize(eval_env, training=False, norm_obs=True, norm_reward=False)
+    sync_envs_normalization(venv, eval_env)
+
+    eval_callback = EvalCallback(
+        eval_env,
+        best_model_save_path=os.path.join(LOG_DIR, "best"),
+        log_path=LOG_DIR,
+        eval_freq=50_000,
+        n_eval_episodes=100,
+        deterministic=True,
+    )
+
+    print("[train] start")
+    t0 = time.time()
+    model.learn(total_timesteps=args.total_steps, log_interval=10, callback=eval_callback)
+    t1 = time.time()
+    mins, secs = divmod(t1 - t0, 60)
+    print(f"[train] done in {int(mins)}m{secs:.1f}s")
+
+    model_path = os.path.join(LOG_DIR, f"{ALG}_kinematic_model")
+    vecnorm_path = os.path.join(LOG_DIR, f"{ALG}_vecnorm.pkl")
+    model.save(model_path)
+    venv.save(vecnorm_path)
+    print(f"Saved model to: {model_path}")
+    print(f"Saved VecNormalize stats to: {vecnorm_path}")
+
+    # 简单 eval（可选）
+    eval_venv = DummyVecEnv([make_env_eval()])
+    eval_venv = VecNormalize.load(vecnorm_path, eval_venv)
+    eval_venv.training = False
+    eval_venv.norm_reward = False
+    mean_r, std_r = evaluate_policy(model, eval_venv, n_eval_episodes=10, deterministic=True)
+    print(f"[{ALG}] Eval return: {mean_r:.2f} ± {std_r:.2f}")
+
+# ============ CLI 入口 ============
+
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--mode", choices=["train", "plot", "train_and_plot"], default="train",
+                   help="train: 只训练; plot: 只画图; train_and_plot: 训练完立刻画一次")
+    p.add_argument("--log-dir", type=str,
+                   default="/workspace/kinodynamic_car_SB3/backup/with_obstacle_avoidance_v7/0",
+                   help="保存/读取模型的目录")
+    p.add_argument("--n-envs", type=int, default=N_ENVS, help="并行环境个数")
+    p.add_argument("--eval-envs", type=int, default=EVAL_ENVS, help="评估并行环境个数")
+    p.add_argument("--total-steps", type=int, default=TOTAL_STEPS, help="训练总步数")
+
+    # 可视化专用参数
+    p.add_argument("--episodes", type=int, default=16, help="可视化的轨迹条数")
+    p.add_argument("--max-steps", type=int, default=400, help="每条轨迹的最大步数")
+    p.add_argument("--deterministic", action="store_true", help="可视化时用确定性策略")
+    return p.parse_args()
+
 if __name__ == "__main__":
-    # 多进程安全启动方式（Linux/Windows/Notebook 都安全）
     import multiprocessing as mp
     try:
         mp.set_start_method("spawn", force=True)
     except RuntimeError:
         pass
-    main()
+
+    args = parse_args()
+
+    if args.mode in ["train", "train_and_plot"]:
+        train_and_optionally_eval(args)
+
+    if args.mode in ["plot", "train_and_plot"]:
+        visualize_trajectories(
+            log_dir=args.log_dir,
+            alg_name=ALG,
+            episodes=args.episodes,
+            max_steps=args.max_steps,
+            deterministic=args.deterministic,
+            title_suffix=args.mode
+        )

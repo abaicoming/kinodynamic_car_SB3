@@ -56,7 +56,10 @@ PY
 
 5. train
 ` export PYTHONPATH=/workspace:$PYTHONPATH `
-` python /workspace/kinodynamic_car_SB3/train_ddpg.py `
+<!-- ` python /workspace/kinodynamic_car_SB3/train_ddpg.py ` -->
+a. train: `python train_ddpg.py --mode train --log-dir <你的目录>`
+b. plot: ` python train_ddpg.py --mode plot --log-dir <你的目录> --episodes 16 --max-steps 400 `
+c. train_and_plot: `python train_ddpg.py --mode train_and_plot --log-dir <你的目录> --episodes 16 --max-steps 400`
 
 6. open tensorboard to check results
 `tensorboard --logdir /workspace/kinodynamic_car_SB3/logs`
