@@ -8,6 +8,9 @@ import gymnasium as gym
 import torch
 from matplotlib.patches import Circle
 
+import matplotlib.cm as cm
+from matplotlib.colors import to_rgba
+
 # ===== SB3 =====
 from stable_baselines3 import DDPG, TD3
 from stable_baselines3.common.monitor import Monitor
@@ -146,7 +149,26 @@ def visualize_trajectories(
     # 绘图
     plt.figure(figsize=(7, 7))
     ax = plt.gca()
-    colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+    # -------------------- 🔸颜色生成策略--------------------
+    # 1. 成功轨迹用绿色渐变 ('Greens')
+    # 2. 失败轨迹用红色渐变 ('Reds')
+    succ_trajs = [t for t in trajectories if t[-1] is True]
+    fail_trajs = [t for t in trajectories if t[-1] is False]
+
+    succ_cmap = cm.get_cmap('Greens', len(succ_trajs) + 2)
+    fail_cmap = cm.get_cmap('Reds', len(fail_trajs) + 2)
+
+    succ_colors = [succ_cmap(i + 1) for i in range(len(succ_trajs))]
+    fail_colors = [fail_cmap(i + 1) for i in range(len(fail_trajs))]
+
+    # 为统一顺序重组轨迹和颜色列表
+    colors = []
+    for t in trajectories:
+        if t[-1]:
+            colors.append(succ_colors.pop(0))
+        else:
+            colors.append(fail_colors.pop(0))
+    # -----------------------------------------------------
 
     # 画障碍物 + 安全圈
     oc = getattr(base_env, "obstacle_center", (0.0, 0.0))
@@ -181,15 +203,6 @@ def visualize_trajectories(
         plt.quiver(np.array(xs)[idx], np.array(ys)[idx], ux, uy,
                    angles='xy', scale_units='xy', scale=1.0,
                    width=0.004, color=c, alpha=0.7)
-
-    # 放在右侧
-    # plt.legend(
-    #     loc='center left',
-    #     bbox_to_anchor=(1.02, 0.5),   # 把图例锚在图右外侧
-    #     frameon=False,
-    #     fontsize=8
-    # )
-    # plt.tight_layout(rect=[0, 0, 0.85, 1])  # 给右边留空间
 
     # 放在下方
     plt.legend(
