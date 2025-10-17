@@ -67,6 +67,11 @@ class KinematicCarEnv(gym.Env):
         safe_margin: float = 0.2,                           # 安全边距（碰撞前的预警圈）
         w_obs_shaping: float = 0.5,                         # 贴近障碍的连续惩罚系数
         w_collision: float = 50.0,                          # 碰撞一次的巨大惩罚
+
+        obs_shaping_type: str = "exp",
+        obs_sigma: float = 0.8,
+        obs_margin: float = 0.5,
+        obs_power: float = 2.0,
     ):
         super().__init__()
 
@@ -107,6 +112,11 @@ class KinematicCarEnv(gym.Env):
         self.safe_margin = float(safe_margin)
         self.w_obs_shaping = float(w_obs_shaping)
         self.w_collision = float(w_collision)
+
+        self.obs_shaping_type = obs_shaping_type
+        self.obs_sigma = float(obs_sigma)
+        self.obs_margin = float(obs_margin)
+        self.obs_power = float(obs_power)
 
         # 动作空间
         self.action_space = spaces.Box(
@@ -223,7 +233,7 @@ class KinematicCarEnv(gym.Env):
         if options is not None:
             start = options.get("start", None)
             goal = options.get("goal", None)
-            
+
         # >>> 新增：若调用过 set_start_goal_for_next_reset，则覆盖 options
         if hasattr(self, "_forced_start") or hasattr(self, "_forced_goal"):
             fs = getattr(self, "_forced_start", None)
@@ -312,11 +322,43 @@ class KinematicCarEnv(gym.Env):
 
         # ---- 避障 shaping（软惩罚/奖励）----
         d_obs = self._dist_to_obstacle()
-        # “软惩罚”常见做法：对 (clearance) 采用递增惩罚，例如 1/(clearance) 或 exp
-        clearance = max(d_obs - self.obstacle_radius, 1e-3)  # 离障碍表面的距离
-        shaping = - self.w_obs_shaping * (1.0 / clearance)   # 越近惩罚越大 or -w_obs_shaping * exp(-k * clearance)
+
+        # ---- clearance: 距离障碍表面 ----
+        clearance = d_obs - self.obstacle_radius
+        m = self.obs_margin
+        lam = self.w_obs_shaping
+        sig = self.obs_sigma
+
+        if self.obs_shaping_type == "exp":
+            # 远处 ~0，近处平滑增大惩罚；可选仅在安全圈内启用
+            if clearance <= m:
+                shaping = - lam * math.exp(- max(clearance, 0.0) / max(sig, 1e-6))
+            else:
+                shaping = 0.0
+
+        elif self.obs_shaping_type == "quad":
+            # 进入安全圈才罚，深度二次增长；数值很稳
+            pen = max(0.0, m - clearance)  # 侵入深度
+            shaping = - lam * (pen ** 2)
+
+        elif self.obs_shaping_type == "barrier":
+            # 对数屏障：靠近边界惩罚爆炸；只在可行域内定义
+            h = clearance
+            if h > 0.0:
+                shaping = - lam * math.log(h / max(m, 1e-6) + 1e-6)
+            else:
+                # 已经穿透：给大罚（也可直接判碰撞终止）
+                shaping = - lam * 10.0
+
+        elif self.obs_shaping_type == "reciprocal":
+            # 倒数幂，默认 p=2，比 p=1 稳一些
+            shaping = - lam / ((max(clearance, 1e-3)) ** self.obs_power)
+
+        else:  # "none"
+            shaping = 0.0
+
         reward += shaping
-        
+
         # ---- 终止条件 ----
         pos_ok = self._goal_pos_ok()
         yaw_ok = self._goal_yaw_ok()

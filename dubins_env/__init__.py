@@ -28,8 +28,13 @@ register(
         # ---- 新增避障相关参数 ----
         obstacle_center=(0.0, 0.0),
         obstacle_radius=1.0,
-        safe_margin=0.3,
-        w_obs_shaping=10,
+        safe_margin=0.5,
+        w_obs_shaping=0.5,
         w_collision=100.0,
+        # ----  更优秀的障碍惩罚 ----
+        obs_shaping_type = "exp",
+        obs_sigma = 0.8,
+        obs_margin = 0.5,
+        obs_power = 2.0,
     ),
 )
