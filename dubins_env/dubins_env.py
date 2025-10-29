@@ -266,7 +266,8 @@ class KinematicCarEnv(gym.Env):
         # --- 确保起点/终点不在障碍物内 ---
         ox, oy = self.obstacle_center
         def ok(p):
-            return math.hypot(p[0] - ox, p[1] - oy) > (self.obstacle_radius + self.safe_margin)
+            # return math.hypot(p[0] - ox, p[1] - oy) > (self.obstacle_radius + self.safe_margin)
+            return math.hypot(p[0] - ox, p[1] - oy) > (self.obstacle_radius) # 采样起点终点时无需加 safe_margin
         if not ok(self.state) or not ok(self.goal):
             # 简单地重新采样；工程上可设置最大重采样次数
             while True:

@@ -19,7 +19,7 @@ register(
         w_yaw=4,
         w_u_v=5e-4,
         w_u_steer=1e-3,
-        w_goal=200.0,
+        w_goal=500.0,
         xy_range=(-6.0, 6.0),
         goal_xy_range=(-6.0, 6.0),
         min_start_goal_dist=0.1,
@@ -28,13 +28,13 @@ register(
         # ---- 新增避障相关参数 ----
         obstacle_center=(0.0, 0.0),
         obstacle_radius=1.0,
-        safe_margin=0.5,
-        w_obs_shaping=0.5,
-        w_collision=100.0,
+        safe_margin=1.0,
+        w_obs_shaping=500,
+        w_collision=10000.0,
         # ----  更优秀的障碍惩罚 ----
-        obs_shaping_type = "exp",
+        obs_shaping_type = "quad",
         obs_sigma = 0.8,
-        obs_margin = 0.5,
+        obs_margin = 1.0,
         obs_power = 2.0,
     ),
 )
