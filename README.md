@@ -29,7 +29,7 @@ sudo docker run -it \
   -v /home/ac/data/xlh/KINODYNAMIC:/workspace \
   -v /usr/lib/x86_64-linux-gnu/:/glu \
   -v /home/n/.local:/.local \
-  --name sb3_test0 \
+  --name sb3_test1 \
   -w /workspace \
   --user $(id -u):$(id -g) \
   stable-baselines3-ready:latest
@@ -57,13 +57,13 @@ PY
 5. train
 ` export PYTHONPATH=/workspace:$PYTHONPATH `
 <!-- ` python /workspace/kinodynamic_car_SB3/train_ddpg.py ` -->
-a. train: `python train_ddpg.py --mode train --log-dir <你的目录>`
-b. plot: ` python train_ddpg.py --mode plot --log-dir <你的目录> --episodes 16 --max-steps 400 `
+a. train: `python train_ddpg.py --alg sac --mode train_and_plot --log-dir /path/to/logdir `
+b. plot: ` python train_ddpg.py --alg trpo --mode plot --log-dir /path/to/logdir --deterministic `
 c. train_and_plot: `python train_ddpg.py --mode train_and_plot --log-dir <你的目录> --episodes 16 --max-steps 400`
-d. contour: ` python train_ddpg.py   --mode contour   --log-dir /workspace/kinodynamic_car_SB3/backup/with_obstacle_avoidance_v7/3   --goal "4.0,2.0,0.0"   --x-range="-6,6"   --y-range="-6,6"   --grid-N 81   --start-theta 0.0 `
+d. contour: `python train_ddpg.py --alg sac  --mode contour --log-dir /path/to/logdir --goal "4.0,2.0,0.0" --x-range "-6,6" --y-range "-6,6" --grid-N 101 --start-theta 0.0 `
 
 6. open tensorboard to check results
-`tensorboard --logdir /workspace/kinodynamic_car_SB3/logs`
+` tensorboard --logdir /workspace/kinodynamic_car_SB3/logs `
 
 
 ## how to transfer files between two ubuntus

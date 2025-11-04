@@ -1,18 +1,14 @@
 import math
 from typing import Optional, Tuple, Dict, Any
-
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
-
-
+import sys
 def wrap_angle(angle: float) -> float:
     a = (angle + math.pi) % (2 * math.pi) - math.pi
     if a == -math.pi:
         a = math.pi
     return a
-
-
 
 class KinematicCarEnv(gym.Env):
     """
@@ -21,151 +17,141 @@ class KinematicCarEnv(gym.Env):
         y_dot = u0 * sin(theta)
         theta_dot = (u0 / L) * tan(u1)
 
-    动作空间 (2D, 连续)：
-        a = [a_v, a_delta] in [-1, 1]^2
-        -> u0 (线速度), u1 (转角)
-
-    观测 (10D，绝对坐标 + 角度cos/sin)：
-        obs = [x, y, cos(theta), sin(theta), xg, yg, cos(thetag), sin(thetag), u0, u1]
+    动作空间 (2D, 连续)：a=[a_v, a_delta]∈[-1,1]^2
+    观测（13D，本实现用“车体中心 + 朝向前点”而非cos/sin，数值平滑些）：
+        [x, y, x+0.5Lcosθ, y+0.5Lsinθ, xg, yg, xg+0.5Lcosθg, yg+0.5Lsinθg, u0, u1, x-ox, y-oy, ‖p-o‖]
     """
 
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 30}
 
     def __init__(
         self,
-        # 几何/积分
         L: float = 1.0,
         dt: float = 0.1,
-        # 速度与转角限制
         v_max: float = 1.5,
-        v_min: float = 0.0,            # 仅在 allow_reverse=False 时有效
-        steer_max: float = 0.6,        # ≈34.4°，前轮最大转角（弧度）
-        allow_reverse: bool = False,   # 是否允许倒车（u0<0）
-        # 任务设置
-        goal_tol: float = 0.15,         # 位置容差（米）
-        yaw_tol: float = 0.25,          # 朝向容差（弧度，~14°）
+        v_min: float = 0.0,
+        steer_max: float = 0.6,
+        allow_reverse: bool = False,
+        goal_tol: float = 0.15,
+        yaw_tol: float = 0.25,
         max_episode_steps: int = 500,
-        # 奖励权重
         w_dist: float = 1.0,
         w_yaw: float = 0.1,
-        w_u_v: float = 0.0005,
-        w_u_steer: float = 0.001,
+        w_u_v: float = 5e-4,
+        w_u_steer: float = 1e-3,
         w_goal: float = 10.0,
-        # 采样范围（复位）
         xy_range: Tuple[float, float] = (-6.0, 6.0),
         theta_range: Tuple[float, float] = (-math.pi, math.pi),
         goal_xy_range: Tuple[float, float] = (-6.0, 6.0),
         goal_theta_range: Tuple[float, float] = (-math.pi, math.pi),
         min_start_goal_dist: float = 1.5,
-        # 观测噪声
         obs_noise_std: float = 0.0,
-        # 渲染
         render_mode: Optional[str] = None,
-        # 障碍物
-        obstacle_center: Tuple[float, float] = (0.0, 0.0),  # 圆障碍中心
-        obstacle_radius: float = 1.0,                       # 圆障碍半径
-        safe_margin: float = 0.2,                           # 安全边距（碰撞前的预警圈）
-        w_obs_shaping: float = 0.5,                         # 贴近障碍的连续惩罚系数
-        w_collision: float = 50.0,                          # 碰撞一次的巨大惩罚
-
-        obs_shaping_type: str = "exp",
+        obstacle_center: Tuple[float, float] = (0.0, 0.0),
+        obstacle_radius: float = 1.0,
+        safe_margin: float = 0.5,
+        w_obs_shaping: float = 2.0,
+        w_collision: float = 50.0,
+        # shaping 选择
+        obs_shaping_type: str = "exp",  # ["exp","quad","barrier","reciprocal","none"]
         obs_sigma: float = 0.8,
         obs_margin: float = 0.5,
         obs_power: float = 2.0,
+
+        input_mode:str = "old_input", # ["old_input", "new_input"]
+        fixed_goal_flag: bool = False,
+        fixed_goal:Tuple[float,float,float] = (1.5,0,0)
     ):
         super().__init__()
 
-        # 参数
-        self.L = float(L)
-        self.dt = float(dt)
-        self.v_max = float(v_max)
-        self.v_min = float(v_min)
-        self.steer_max = float(steer_max)
-        self.allow_reverse = bool(allow_reverse)
-
-        self.goal_tol = float(goal_tol)
-        self.yaw_tol  = float(yaw_tol)
+        self.L = float(L); self.dt = float(dt)
+        self.v_max = float(v_max); self.v_min = float(v_min)
+        self.steer_max = float(steer_max); self.allow_reverse = bool(allow_reverse)
+        self.goal_tol = float(goal_tol); self.yaw_tol = float(yaw_tol)
         self.max_episode_steps = int(max_episode_steps)
 
-        self.w_dist = float(w_dist)
-        self.w_yaw = float(w_yaw)
-        self.w_u_v = float(w_u_v)
-        self.w_u_steer = float(w_u_steer)
+        self.w_dist = float(w_dist); self.w_yaw = float(w_yaw)
+        self.w_u_v = float(w_u_v);   self.w_u_steer = float(w_u_steer)
         self.w_goal = float(w_goal)
 
-        self.xy_range = xy_range
-        self.theta_range = theta_range
-        self.goal_xy_range = goal_xy_range
-        self.goal_theta_range = goal_theta_range
+        self.xy_range = xy_range; self.theta_range = theta_range
+        self.goal_xy_range = goal_xy_range; self.goal_theta_range = goal_theta_range
         self.min_start_goal_dist = float(min_start_goal_dist)
 
         self.obs_noise_std = float(obs_noise_std)
-
         self.render_mode = render_mode
         self._renderer_initialized = False
-        self._fig = None
-        self._ax = None
+        self._fig = None; self._ax = None
 
-        # 障碍物
         self.obstacle_center = tuple(obstacle_center)
         self.obstacle_radius = float(obstacle_radius)
         self.safe_margin = float(safe_margin)
         self.w_obs_shaping = float(w_obs_shaping)
         self.w_collision = float(w_collision)
 
-        self.obs_shaping_type = obs_shaping_type
+        self.obs_shaping_type = str(obs_shaping_type)
         self.obs_sigma = float(obs_sigma)
         self.obs_margin = float(obs_margin)
         self.obs_power = float(obs_power)
 
-        # 动作空间
-        self.action_space = spaces.Box(
-            low=np.array([-1.0, -1.0], dtype=np.float32),
-            high=np.array([+1.0, +1.0], dtype=np.float32),
-            dtype=np.float32,
-        )
+        self.input_mode = str(input_mode)
+        self.fixed_goal_flag = fixed_goal_flag  # 控制目标是否固定
+        self.fixed_goal = fixed_goal
 
-        # 观测空间：obs = [x, y, cos(th), sin(th), xg, yg, cos(thg), sin(thg), u0, u1]
-        low = np.array(
-            [-np.inf, -np.inf, -1.0, -1.0, -np.inf, -np.inf, -1.0, -1.0, -self.v_max, -self.steer_max, -np.inf, -np.inf, -np.inf],
-            dtype=np.float32,
-        )
-        high = np.array(
-            [ np.inf,  np.inf,  1.0,  1.0,  np.inf,  np.inf,  1.0,  1.0,  self.v_max,  self.steer_max, np.inf, np.inf, np.inf],
-            dtype=np.float32,
-        )
+        # 动作/观测空间
+        self.action_space = spaces.Box(low=np.array([-1.0, -1.0], np.float32),
+                                       high=np.array([+1.0, +1.0], np.float32),
+                                       dtype=np.float32)
+        if self.input_mode == "old_input":
+            # old
+            low = np.array(
+                [-np.inf, -np.inf, -1.0, -1.0, -np.inf, -np.inf, -1.0, -1.0, -self.v_max, -self.steer_max, -np.inf, -np.inf, -np.inf],
+                dtype=np.float32,
+            )
+            high = np.array(
+                [ np.inf,  np.inf,  1.0,  1.0,  np.inf,  np.inf,  1.0,  1.0,  self.v_max,  self.steer_max, np.inf, np.inf, np.inf],
+                dtype=np.float32,
+            )
+        elif self.input_mode == "new_input":
+            #new
+            low = np.array(
+                [-np.inf, -np.inf, -np.inf, -np.inf, -np.inf, -np.inf, -np.inf, -np.inf, -self.v_max, -self.steer_max, -np.inf, -np.inf, -np.inf],
+                dtype=np.float32,
+            )
+            high = np.array(
+                [ np.inf,  np.inf,  np.inf,  np.inf,  np.inf,  np.inf,  np.inf,  np.inf,  self.v_max,  self.steer_max, np.inf, np.inf, np.inf],
+                dtype=np.float32,
+            )
+
         self.observation_space = spaces.Box(low=low, high=high, dtype=np.float32)
 
         # 状态
-        self.state = None          # (x, y, theta)
-        self.goal = None           # (xg, yg, thetag)
-        self.u0 = 0.0              # 上一步线速度
-        self.u1 = 0.0              # 上一步转角
+        self.state = None      # (x,y,theta)
+        self.goal = None       # (xg,yg,thetag)
+        self.u0 = 0.0; self.u1 = 0.0
         self._elapsed_steps = 0
+
+        self._forced_start = None
+        self._forced_goal = None
 
         self.np_random, _ = gym.utils.seeding.np_random(None)
 
-    # ---------- External control for next reset ----------
+    # 外部在“下一次 reset”设置起终点
     def set_start_goal_for_next_reset(self, start=None, goal=None):
-        """
-        设置“下次 reset 生效”的起点/终点。传 None 表示不强制。
-        形如 start=(x, y, theta), goal=(xg, yg, thetag)
-        """
+        # print("i am in")
+        # sys.exists()
         self._forced_start = start
         self._forced_goal = goal
 
-    # 到障碍的距离
+    # 工具
     def _dist_to_obstacle(self) -> float:
         ox, oy = self.obstacle_center
         x, y, _ = self.state
         return math.hypot(x - ox, y - oy)
-    
-    # 碰撞判定
+
     def _collided(self) -> bool:
-        # TODO:目前小车视作质点；若要考虑车体半径，可加上车体半径 r_car
         return self._dist_to_obstacle() <= (self.obstacle_radius)
-    
-    # ---------- utils ----------
+
     def _sample_pose(self, xy_range, theta_range):
         x = self.np_random.uniform(xy_range[0], xy_range[1])
         y = self.np_random.uniform(xy_range[0], xy_range[1])
@@ -178,8 +164,7 @@ class KinematicCarEnv(gym.Env):
         pos_ok = math.hypot(xg - x, yg - y) < self.goal_tol
         yaw_ok = abs(wrap_angle(thg - th)) < self.yaw_tol
         return bool(pos_ok and yaw_ok)
-    
-    # 如需单独判定
+
     def _goal_pos_ok(self) -> bool:
         x, y, _ = self.state
         xg, yg, _ = self.goal
@@ -202,74 +187,74 @@ class KinematicCarEnv(gym.Env):
         xg, yg, thg = self.goal
         ox, oy = self.obstacle_center
         dobs = math.hypot(x - ox, y - oy)
+        if self.input_mode == "old_input":
+            # old
+            obs = np.array(
+                [x, y, math.cos(th), math.sin(th),
+                xg, yg, math.cos(thg), math.sin(thg),
+                self.u0, self.u1,
+                x - ox, y - oy, dobs
+                ],
+                dtype=np.float32,
+            )
+        elif self.input_mode == "new_input":
+            # new
+            obs = np.array(
+                [x, y,
+                x + 0.5*self.L*math.cos(th), y + 0.5*self.L*math.sin(th),
+                xg, yg,
+                xg + 0.5*self.L*math.cos(thg), yg + 0.5*self.L*math.sin(thg),
+                self.u0, self.u1,
+                x - ox, y - oy, dobs], dtype=np.float32,
+            )
 
-        obs = np.array(
-            [x, y, math.cos(th), math.sin(th),
-             xg, yg, math.cos(thg), math.sin(thg),
-             self.u0, self.u1,
-             # --- 新增：障碍相对信息（可选） ---
-             x - ox, y - oy, dobs
-            ],
-            dtype=np.float32,
-        )
-
-        # 添加观测噪声
         if self.obs_noise_std > 0:
             obs += self.np_random.normal(0.0, self.obs_noise_std, size=obs.shape).astype(np.float32)
         return obs
 
-    # ---------- Gym API ----------
+    # Gym API
     def seed(self, seed: Optional[int] = None):
         self.np_random, _ = gym.utils.seeding.np_random(seed)
 
-    def reset(self, *, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None):
+    def reset(self, *, seed: Optional[int]=None, options: Optional[Dict[str, Any]]=None):
         super().reset(seed=seed)
         if seed is not None:
             self.seed(seed)
 
-        # 支持通过 options 指定起点/终点
-        start = None
-        goal = None
-        if options is not None:
-            start = options.get("start", None)
-            goal = options.get("goal", None)
+        start = options.get("start") if options else None
+        goal  = options.get("goal") if options else None
 
-        # >>> 新增：若调用过 set_start_goal_for_next_reset，则覆盖 options
-        if hasattr(self, "_forced_start") or hasattr(self, "_forced_goal"):
-            fs = getattr(self, "_forced_start", None)
-            fg = getattr(self, "_forced_goal", None)
-            if fs is not None or fg is not None:
-                start = fs if fs is not None else start
-                goal  = fg if fg is not None else goal
-            # 用完就清掉，避免影响后续 reset
+        if self._forced_start is not None or self._forced_goal is not None:
+            start = self._forced_start if self._forced_start is not None else start
+            goal  = self._forced_goal  if self._forced_goal  is not None else goal
             self._forced_start = None
             self._forced_goal = None
-        # <<< 新增结束
 
         if start is None or goal is None:
-            # 随机采样起点/终点，保证最小间距
-            while True:
-                st = self._sample_pose(self.xy_range, self.theta_range)
-                gl = self._sample_pose(self.goal_xy_range, self.goal_theta_range)
-                x, y, _ = st
-                xg, yg, _ = gl
-                if math.hypot(xg - x, yg - y) >= self.min_start_goal_dist:
-                    self.state = st
-                    self.goal = gl
-                    break
+            if self.fixed_goal_flag:
+                while True:
+                    st = self._sample_pose(self.xy_range, self.theta_range)
+                    gl = self.fixed_goal
+                    if math.hypot(gl[0]-st[0], gl[1]-st[1]) >= self.min_start_goal_dist:
+                        self.state, self.goal = st, gl
+                        break
+            else:
+                while True:
+                    st = self._sample_pose(self.xy_range, self.theta_range)
+                    gl = self._sample_pose(self.goal_xy_range, self.goal_theta_range)
+                    if math.hypot(gl[0]-st[0], gl[1]-st[1]) >= self.min_start_goal_dist:
+                        self.state, self.goal = st, gl
+                        break
         else:
             sx, sy, sth = start
             gx, gy, gth = goal
             self.state = (float(sx), float(sy), float(sth))
-            self.goal = (float(gx), float(gy), float(gth))
+            self.goal  = (float(gx), float(gy), float(gth))
 
-        # --- 确保起点/终点不在障碍物内 ---
+        # 确保起终点不在障碍物内（不强制 safe_margin）
         ox, oy = self.obstacle_center
-        def ok(p):
-            # return math.hypot(p[0] - ox, p[1] - oy) > (self.obstacle_radius + self.safe_margin)
-            return math.hypot(p[0] - ox, p[1] - oy) > (self.obstacle_radius) # 采样起点终点时无需加 safe_margin
+        def ok(p): return math.hypot(p[0]-ox, p[1]-oy) > (self.obstacle_radius)
         if not ok(self.state) or not ok(self.goal):
-            # 简单地重新采样；工程上可设置最大重采样次数
             while True:
                 st = self._sample_pose(self.xy_range, self.theta_range)
                 gl = self._sample_pose(self.goal_xy_range, self.goal_theta_range)
@@ -278,19 +263,15 @@ class KinematicCarEnv(gym.Env):
                     break
 
         self._elapsed_steps = 0
-        self.u0 = 0.0
-        self.u1 = 0.0
-
+        self.u0 = 0.0; self.u1 = 0.0
+        # print(self.state)
+        # print(self.goal)
         obs = self._get_obs()
-        info: Dict[str, Any] = {}
-        if self.render_mode == "human":
-            self._render_frame()
-        return obs, info
+        return obs, {}
 
     def step(self, action: np.ndarray):
         self._elapsed_steps += 1
 
-        # ---- 动作缩放 ----
         action = np.asarray(action, dtype=np.float32).reshape(-1)
         av = float(np.clip(action[0], -1.0, 1.0))
         adelta = float(np.clip(action[1], -1.0, 1.0))
@@ -298,154 +279,104 @@ class KinematicCarEnv(gym.Env):
         if self.allow_reverse:
             u0 = av * self.v_max
         else:
-            # [v_min, v_max]
-            u0 = 0.5 * (av + 1.0) * (self.v_max - self.v_min) + self.v_min
-
+            u0 = 0.5*(av+1.0)*(self.v_max - self.v_min) + self.v_min
         u1 = adelta * self.steer_max
-        # 保存以便观测/奖励
         self.u0, self.u1 = float(u0), float(u1)
 
-        # ---- 欧拉积分 ----
         x, y, th = self.state
-        x += u0 * math.cos(th) * self.dt
-        y += u0 * math.sin(th) * self.dt
-        th = wrap_angle(th + (u0 / self.L) * math.tan(u1) * self.dt)
+        x += u0*math.cos(th)*self.dt
+        y += u0*math.sin(th)*self.dt
+        th = wrap_angle(th + (u0/self.L)*math.tan(u1)*self.dt)
         self.state = (x, y, th)
 
-        # ---- 奖励与结束 ----
         dist, dth = self._distance_and_heading()
         reward = (
             - self.w_dist * dist
             - self.w_yaw * dth
-            - self.w_u_v * (u0 ** 2)
-            - self.w_u_steer * (u1 ** 2)
+            - self.w_u_v * (u0**2)
+            - self.w_u_steer * (u1**2)
         )
 
-        # ---- 避障 shaping（软惩罚/奖励）----
+        # 避障 shaping
         d_obs = self._dist_to_obstacle()
-
-        # ---- clearance: 距离障碍表面 ----
         clearance = d_obs - self.obstacle_radius
-        m = self.obs_margin
-        lam = self.w_obs_shaping
-        sig = self.obs_sigma
+        m = self.obs_margin; lam = self.w_obs_shaping; sig = self.obs_sigma
 
         if self.obs_shaping_type == "exp":
-            # 远处 ~0，近处平滑增大惩罚；可选仅在安全圈内启用
-            if clearance <= m:
-                shaping = - lam * math.exp(- max(clearance, 0.0) / max(sig, 1e-6))
-            else:
-                shaping = 0.0
-
+            shaping = - lam * math.exp(- max(clearance, 0.0) / max(sig, 1e-6)) if clearance <= m else 0.0
         elif self.obs_shaping_type == "quad":
-            # 进入安全圈才罚，深度二次增长；数值很稳
-            pen = max(0.0, m - clearance)  # 侵入深度
+            pen = max(0.0, m - clearance)
             shaping = - lam * (pen ** 2)
-
         elif self.obs_shaping_type == "barrier":
-            # 对数屏障：靠近边界惩罚爆炸；只在可行域内定义
-            h = clearance
-            if h > 0.0:
-                shaping = - lam * math.log(h / max(m, 1e-6) + 1e-6)
+            if clearance > 0.0:
+                shaping = lam * math.log(clearance / max(m, 1e-6) + 1e-6)
             else:
-                # 已经穿透：给大罚（也可直接判碰撞终止）
                 shaping = - lam * 10.0
-
         elif self.obs_shaping_type == "reciprocal":
-            # 倒数幂，默认 p=2，比 p=1 稳一些
             shaping = - lam / ((max(clearance, 1e-3)) ** self.obs_power)
-
-        else:  # "none"
+        else:
             shaping = 0.0
-
         reward += shaping
 
-        # ---- 终止条件 ----
         pos_ok = self._goal_pos_ok()
         yaw_ok = self._goal_yaw_ok()
         is_goal = self._goal_reached()
         is_collision = self._collided()
 
-        if is_goal:
-            reward += self.w_goal
-
-        if is_collision:
-            reward -= self.w_collision
+        if is_goal:      reward += self.w_goal
+        if is_collision: reward -= self.w_collision
 
         terminated = bool(is_goal or is_collision)
-
-        truncated = self._elapsed_steps >= self.max_episode_steps
+        truncated  = self._elapsed_steps >= self.max_episode_steps
 
         obs = self._get_obs()
-
-        # ！！！在 auto-reset 发生前，把“终止时的真实状态”放进 info
         state_tuple = (float(self.state[0]), float(self.state[1]), float(self.state[2]))
         info = {
-            "dist": dist,
-            "dtheta": dth,
-            "u0": u0,
-            "u1": u1,
-            "is_success": bool(is_goal),  # 便于外部统计“到达率”
-            "success": bool(is_goal),  # 兼容两种键名，稳妥！
-            "pos_ok": pos_ok,              # 细粒度：只位置到达？
-            "yaw_ok": yaw_ok,              # 细粒度：只朝向到达？
-            "is_collision": is_collision,  # 方便调试看失败原因
-            "state": state_tuple,      # 每一步状态
+            "dist": dist, "dtheta": dth,
+            "u0": u0, "u1": u1,
+            "is_success": bool(is_goal), "success": bool(is_goal),
+            "pos_ok": pos_ok, "yaw_ok": yaw_ok,
+            "is_collision": is_collision,
+            "state": state_tuple,
         }
-            
         if terminated or truncated:
-            info["terminal_state"] = state_tuple  # 终止(或截断)时的最后状态
+            info["terminal_state"] = state_tuple
 
         if self.render_mode == "human":
             self._render_frame()
-
         return obs, reward, terminated, truncated, info
 
-    # ---------- Rendering ----------
+    # 渲染
     def _render_frame(self):
         import matplotlib.pyplot as plt
         from matplotlib.patches import Circle
-
         if not self._renderer_initialized:
             self._fig, self._ax = plt.subplots()
             self._renderer_initialized = True
+        ax = self._ax; ax.clear()
+        x, y, th = self.state; xg, yg, thg = self.goal
 
-        ax = self._ax
-        ax.clear()
-
-        # 先拿到状态/目标
-        x, y, th = self.state
-        xg, yg, thg = self.goal
-
-        # --- 在这里添加障碍 ---
         circ = Circle(self.obstacle_center, radius=self.obstacle_radius,
                       facecolor="k", edgecolor="k", alpha=0.2, lw=1.0)
         ax.add_patch(circ)
 
-        # 后续继续画车、目标、箭头……
         ax.plot([x], [y], marker="o")
         ax.plot([xg], [yg], marker="*", markersize=12)
 
-        # 车朝向
         Lvis = 0.6
-        ax.arrow(x, y, Lvis * math.cos(th), Lvis * math.sin(th),
-                 head_width=0.2, length_includes_head=True)
-        # 目标朝向
-        ax.arrow(xg, yg, Lvis * math.cos(thg), Lvis * math.sin(thg),
-                 head_width=0.2, length_includes_head=True, alpha=0.5)
+        ax.arrow(x, y, Lvis*math.cos(th),  Lvis*math.sin(th),  head_width=0.2, length_includes_head=True)
+        ax.arrow(xg, yg, Lvis*math.cos(thg), Lvis*math.sin(thg), head_width=0.2, length_includes_head=True, alpha=0.5)
 
         xr = self.xy_range
-        ax.set_xlim(xr[0] - 1, xr[1] + 1)
-        ax.set_ylim(xr[0] - 1, xr[1] + 1)
-        ax.set_aspect("equal")
-        ax.grid(True)
+        ax.set_xlim(xr[0]-1, xr[1]+1)
+        ax.set_ylim(xr[0]-1, xr[1]+1)
+        ax.set_aspect("equal"); ax.grid(True)
         ax.set_title(f"KinematicCar | step={self._elapsed_steps}")
 
         self._fig.canvas.draw()
         if self.render_mode == "human":
             self._fig.canvas.flush_events()
-            import time
-            time.sleep(1.0 / self.metadata["render_fps"])
+            import time; time.sleep(1.0 / self.metadata["render_fps"])
 
     def render(self):
         if self.render_mode == "rgb_array":
@@ -466,6 +397,4 @@ class KinematicCarEnv(gym.Env):
                 plt.close(self._fig)
             except Exception:
                 pass
-        self._fig = None
-        self._ax = None
-        self._renderer_initialized = False
+        self._fig = None; self._ax = None; self._renderer_initialized = False
