@@ -344,6 +344,9 @@ class KinematicCarEnv(gym.Env):
 
         if self.render_mode == "human":
             self._render_frame()
+
+        # # 打印 info（用于调试）
+        # print(info)  # 这行可以帮助您在终端查看每一步的info
         return obs, reward, terminated, truncated, info
 
     # 渲染

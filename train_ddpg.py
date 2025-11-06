@@ -10,7 +10,7 @@ from matplotlib.patches import Circle
 import matplotlib.cm as cm
 
 # ===== SB3 / Contrib =====
-from stable_baselines3 import DDPG, TD3, SAC
+from stable_baselines3 import DDPG, TD3, SAC, PPO
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.noise import NormalActionNoise
 from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv, VecNormalize
@@ -77,18 +77,20 @@ def make_env_for_traj():
     return _thunk
 
 # ============ 通用：选择算法 & policy_kwargs ============
-ALG_CHOICES = ["ddpg", "td3", "sac"] + (["trpo"] if HAS_TRPO else [])
+ALG_CHOICES = ["ddpg", "td3", "sac", "ppo"] + (["trpo"] if HAS_TRPO else [])
 
 def build_algo(algo_name: str):
     name = algo_name.lower()
     if name == "ddpg": return DDPG
     if name == "td3":  return TD3
     if name == "sac":  return SAC
+    if name == "ppo":  return PPO  # 添加对PPO的支持
     if name == "trpo":
         if not HAS_TRPO:
             raise ImportError("需要安装 sb3-contrib 才能使用 TRPO：pip install sb3-contrib==<同SB3版本>")
         return TRPO
     raise ValueError(f"Unsupported alg: {algo_name}")
+
 
 def default_policy_kwargs(algo_name: str, hidden=([256]*6)):
     name = algo_name.lower()
@@ -98,6 +100,8 @@ def default_policy_kwargs(algo_name: str, hidden=([256]*6)):
     if name == "sac":
         # SAC: pi / qf
         return dict(net_arch=dict(pi=list(hidden), qf=list(hidden)))
+    if name == "ppo":
+        return dict(net_arch=[256, 256])  # 可以根据需要调整网络结构
     if name == "trpo":
         # TRPO: on-policy，使用 pi / vf 两支
         return dict(net_arch=dict(pi=list(hidden), vf=list(hidden)))
@@ -118,7 +122,7 @@ def visualize_critic_contour(
     """
     固定 goal，在 (x_range, y_range) 上均匀采样起点 (x, y, start_theta)，
     DDPG/TD3/SAC: 画 Q(s, π(s))
-    TRPO:         画 V(s)
+    PPO:           画 V(s) (使用策略网络的值)
     """
     model_path = os.path.join(log_dir, f"{alg_name}_kinematic_model")
     vecnorm_path = os.path.join(log_dir, f"{alg_name}_vecnorm.pkl")
@@ -140,20 +144,21 @@ def visualize_critic_contour(
     Qmap = np.full((grid_N, grid_N), np.nan, dtype=np.float32)
 
     is_trpo = alg_name.lower() == "trpo"
+    is_ppo = alg_name.lower() == "ppo"
 
     for ix, x in enumerate(xs):
         for iy, y in enumerate(ys):
             start = (float(x), float(y), float(start_theta))
-            goal  = (float(goal_pose[0]), float(goal_pose[1]), float(goal_pose[2]))
+            goal = (float(goal_pose[0]), float(goal_pose[1]), float(goal_pose[2]))
 
             traj_venv.env_method("set_start_goal_for_next_reset", start=start, goal=goal)
             obs = traj_venv.reset()  # 已被 VecNormalize 处理（obs_norm）
 
-            # —— 用策略得到动作（用于 Q(s,a)），或直接算 V(s)（TRPO）——
-            if is_trpo:
+            # —— 用策略得到动作（用于 Q(s,a)），或直接算 V(s)（PPO）
+            if is_ppo:
                 with torch.no_grad():
                     obs_t = torch.as_tensor(obs, device=device).float()
-                    v_t = model.policy.predict_values(obs_t)  # [1,1]
+                    v_t = model.policy.predict_values(obs_t)  # 获取策略网络的值
                     val = float(v_t.squeeze().cpu().item())
                 Qmap[iy, ix] = val
                 continue
@@ -196,8 +201,8 @@ def visualize_critic_contour(
     else:
         vmin, vmax = None, None
 
-    label = "V(s)" if is_trpo else "Q(s, π(s)) (higher = better)"
-    title2 = "Value V(s) field" if is_trpo else title
+    label = "V(s)" if is_trpo or is_ppo else "Q(s, π(s)) (higher = better)"
+    title2 = "Value V(s) field" if is_trpo or is_ppo else title
 
     cs = ax.contourf(X, Y, Qmap, levels=30, cmap=cmap, vmin=vmin, vmax=vmax)
     cb = plt.colorbar(cs, ax=ax, shrink=0.8); cb.set_label(label, rotation=90)
@@ -227,6 +232,7 @@ def visualize_critic_contour(
     print(f"[contour] Saved field to: {out_path}")
 
     traj_venv.close()
+
 
 # 采样起点
 def make_start_goals_in_box(
@@ -422,7 +428,7 @@ def train_and_optionally_eval(args):
         action_noise = NormalActionNoise(mean=np.zeros(n_actions, np.float32), sigma=sigma)
 
     Algo = build_algo(ALG)
-    pk = default_policy_kwargs(ALG, hidden=[256]*6) # ddpg net_arch
+    pk = default_policy_kwargs(ALG, hidden=[256]*6) # net_arch
 
     # 不同算法的关键超参
     algo_kwargs = dict(
@@ -431,7 +437,7 @@ def train_and_optionally_eval(args):
         device="cuda" if torch.cuda.is_available() else "cpu",
         tensorboard_log=LOG_DIR,
         seed=SEED,
-        verbose=1,
+        verbose=2,
         policy_kwargs=pk,
     )
 
@@ -447,8 +453,25 @@ def train_and_optionally_eval(args):
             gradient_steps=1,
             action_noise=action_noise,
         ))
+    elif ALG == "ppo":
+        algo_kwargs.update(dict(
+            verbose=1,  
+            learning_rate=2.5e-4,
+            n_steps=512,  # 每个环境步骤
+            batch_size=64,
+            n_epochs=10,   # 每次更新多少次
+            gamma=0.99,
+            gae_lambda=0.95,
+            ent_coef=0.0,   # 熵系数，控制探索
+            vf_coef=0.5,    # 价值函数的损失权重
+            max_grad_norm=0.5,
+            clip_range=0.2, # PPO的剪切范围
+            tensorboard_log=LOG_DIR,
+            policy_kwargs=pk,
+        ))
     elif ALG == "sac":
         algo_kwargs.update(dict(
+            verbose=1,
             learning_rate=1e-4,
             buffer_size=1_000_000,
             learning_starts=50_000,
@@ -492,11 +515,21 @@ def train_and_optionally_eval(args):
         eval_freq=50_000,
         n_eval_episodes=100,
         deterministic=True,
+        verbose=1  # 输出更详细的信息
     )
-
+ 
     print(f"[train:{ALG.upper()}] start")
     t0 = time.time()
-    model.learn(total_timesteps=args.total_steps, log_interval=10, callback=eval_callback)
+    if ALG == "ppo":
+        print(f"[DEBUG] PPO rollout size per update: n_steps({algo_kwargs['n_steps']}) * n_envs({args.n_envs}) = {algo_kwargs['n_steps'] * args.n_envs}")
+        model.learn(
+            total_timesteps=args.total_steps,
+            log_interval=1,          
+            callback=eval_callback,
+            progress_bar=True        
+        )
+    else:
+        model.learn(total_timesteps=args.total_steps, log_interval=10, callback=eval_callback)
     t1 = time.time()
     mins, secs = divmod(t1 - t0, 60)
     print(f"[train] done in {int(mins)}m{secs:.1f}s")
@@ -517,7 +550,7 @@ def train_and_optionally_eval(args):
 # ============ CLI ============
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--alg", choices=ALG_CHOICES, default="ddpg", help="选择算法：ddpg/td3/sac/trpo")
+    p.add_argument("--alg", choices=ALG_CHOICES, default="ddpg", help="选择算法：ddpg/td3/sac/trpo/ppo")
 
     p.add_argument("--mode", choices=["train", "plot", "train_and_plot", "contour"], default="train",
                    help="train: 只训练; plot: 只画图; train_and_plot: 训练+画图; contour: 画等值面")
@@ -536,7 +569,7 @@ def parse_args():
                    help="保存/读取模型的目录")
     p.add_argument("--n-envs", type=int, default=32, help="并行环境个数")
     p.add_argument("--eval-envs", type=int, default=16, help="评估并行环境个数")
-    p.add_argument("--total-steps", type=int, default=400_000, help="训练总步数")
+    p.add_argument("--total-steps", type=int, default=500_000, help="训练总步数")
 
     # 轨迹图参数
     p.add_argument("--episodes", type=int, default=16, help="可视化的轨迹条数")
