@@ -438,7 +438,8 @@ def train_and_optionally_eval(args):
         tensorboard_log=LOG_DIR,
         seed=SEED,
         verbose=2,
-        policy_kwargs=pk,
+        policy_kwargs=dict(net_arch=[256, 256], use_sde=True),
+
     )
 
     if ALG in ["ddpg", "td3"]:
@@ -455,20 +456,29 @@ def train_and_optionally_eval(args):
         ))
     elif ALG == "ppo":
         algo_kwargs.update(dict(
-            verbose=1,  
-            learning_rate=2.5e-4,
-            n_steps=512,  # 每个环境步骤
-            batch_size=64,
-            n_epochs=10,   # 每次更新多少次
-            gamma=0.99,
+            verbose=2,
+            learning_rate=3e-4,
+            n_steps=256,
+            batch_size=128,
+            n_epochs=10,
+            gamma=0.995,
             gae_lambda=0.95,
-            ent_coef=0.0,   # 熵系数，控制探索
-            vf_coef=0.5,    # 价值函数的损失权重
+            ent_coef=0.005,
+            vf_coef=0.5,
             max_grad_norm=0.5,
-            clip_range=0.2, # PPO的剪切范围
+            clip_range=0.15,
+            target_kl=0.03,
+
+            # ✅ 只在顶层传 use_sde；不要在 policy_kwargs 再写一次
+            use_sde=True,
+            sde_sample_freq=4,
+
+            # ✅ policy_kwargs 里不要含 use_sde
+            policy_kwargs=dict(net_arch=[256, 256]),
+
             tensorboard_log=LOG_DIR,
-            policy_kwargs=pk,
         ))
+
     elif ALG == "sac":
         algo_kwargs.update(dict(
             verbose=1,
@@ -569,11 +579,11 @@ def parse_args():
                    help="保存/读取模型的目录")
     p.add_argument("--n-envs", type=int, default=32, help="并行环境个数")
     p.add_argument("--eval-envs", type=int, default=16, help="评估并行环境个数")
-    p.add_argument("--total-steps", type=int, default=500_000, help="训练总步数")
+    p.add_argument("--total-steps", type=int, default=3000_000, help="训练总步数")
 
     # 轨迹图参数
     p.add_argument("--episodes", type=int, default=16, help="可视化的轨迹条数")
-    p.add_argument("--max-steps", type=int, default=800, help="每条轨迹的最大步数")
+    p.add_argument("--max-steps", type=int, default=500, help="每条轨迹的最大步数")
     p.add_argument("--deterministic", action="store_true", help="可视化时用确定性策略")
 
     # 采样盒子与方式
