@@ -522,8 +522,7 @@ def train_and_optionally_eval(args):
             train_freq=1,
             gradient_steps=1,
             # 固定熵系数，不用自动调整
-            ent_coef=0.05,        # ✅ 固定一个小值
-            # 不要再传 target_entropy=None！
+            ent_coef=0.05,        # 固定一个小值
             policy_kwargs=dict(
                 net_arch=dict(pi=[256,256,256,256,256], qf=[256,256,256,256,256]),
                 use_sde=True,
