@@ -272,7 +272,7 @@ def make_start_goals_in_box(
         raise ValueError("mode 必须是 'grid' 或 'random'")
 
     return [ (s, goal_pose) for s in starts ]
-
+    
 def make_random_start_goal_pairs(
     n: int,
     seed: int = 42,
@@ -470,16 +470,22 @@ def train_and_optionally_eval(args):
 
     Algo = build_algo(ALG)
     pk = default_policy_kwargs(ALG, hidden=[256]*6) # net_arch
-
+    # 允许传入 "0"/"1" 这种数字字符串
+    dev = args.device
+    try:
+        dev = int(dev)  # SB3 支持 int（表示 cuda:<idx>）
+    except ValueError:
+        pass
     # 不同算法的关键超参
     algo_kwargs = dict(
         policy="MlpPolicy",
         env=venv,
-        device= 1  if torch.cuda.is_available() else "cpu",
+        device=dev,               # ✅ 这里生效：如 "cuda:1" 或 1
         tensorboard_log=LOG_DIR,
         seed=SEED,
         verbose=2,
-        policy_kwargs=pk,
+        policy_kwargs=dict(net_arch=[256, 256], use_sde=True),
+
     )
 
     if ALG in ["ddpg", "td3"]:
@@ -496,20 +502,29 @@ def train_and_optionally_eval(args):
         ))
     elif ALG == "ppo":
         algo_kwargs.update(dict(
-            verbose=1,  
-            learning_rate=2.5e-4,
-            n_steps=512,  # 每个环境步骤
-            batch_size=64,
-            n_epochs=10,   # 每次更新多少次
-            gamma=0.99,
+            verbose=2,
+            learning_rate=3e-4,
+            n_steps=256,
+            batch_size=128,
+            n_epochs=10,
+            gamma=0.995,
             gae_lambda=0.95,
-            ent_coef=0.0,   # 熵系数，控制探索
-            vf_coef=0.5,    # 价值函数的损失权重
+            ent_coef=0.005,
+            vf_coef=0.5,
             max_grad_norm=0.5,
-            clip_range=0.2, # PPO的剪切范围
+            clip_range=0.15,
+            target_kl=0.03,
+
+            # ✅ 只在顶层传 use_sde；不要在 policy_kwargs 再写一次
+            use_sde=True,
+            sde_sample_freq=4,
+
+            # ✅ policy_kwargs 里不要含 use_sde
+            policy_kwargs=dict(net_arch=[256, 256, 256, 256, 256, 256]),
+
             tensorboard_log=LOG_DIR,
-            policy_kwargs=pk,
         ))
+
     elif ALG == "sac":
         algo_kwargs.update(dict(
             verbose=1,
@@ -608,9 +623,9 @@ def parse_args():
     p.add_argument("--log-dir", type=str,
                    default="/workspace/kinodynamic_car_SB3/backup/with_obstacle_avoidance_v7/0",
                    help="保存/读取模型的目录")
-    p.add_argument("--n-envs", type=int, default=64, help="并行环境个数")
-    p.add_argument("--eval-envs", type=int, default=64, help="评估并行环境个数")
-    p.add_argument("--total-steps", type=int, default=15000_000, help="训练总步数")
+    p.add_argument("--n-envs", type=int, default=32, help="并行环境个数")
+    p.add_argument("--eval-envs", type=int, default=16, help="评估并行环境个数")
+    p.add_argument("--total-steps", type=int, default=10000_000, help="训练总步数")
 
     # 轨迹图参数
     p.add_argument("--episodes", type=int, default=16, help="可视化的轨迹条数")
@@ -629,6 +644,7 @@ def parse_args():
     p.add_argument("--n-samples", type=int, default=120, help="random: 总样本数")
     p.add_argument("--sample-seed", type=int, default=42, help="random: 采样随机种子")
     p.add_argument("--save-samples", action="store_true", help="是否把采样的起点集合保存成 npz")
+    p.add_argument("--device", type=str, default="auto", help="cpu | cuda | cuda:0 | cuda:1 | auto | 0/1/2")
     p.add_argument("--fixed-goal", action="store_true", help="输入时不画图2和3,否则画")
 
     return p.parse_args()
@@ -780,7 +796,6 @@ if __name__ == "__main__":
                     os.path.join(args.log_dir, "eval_sets", f"fig3_fixed_goal_rand_starts_seed{args.sample_seed}.npz"),
                     starts_goals=starts_goals_fig3
                 )
-
 
 
     if args.mode in ["contour", "train_and_plot"]:
