@@ -53,7 +53,7 @@ from .dubins_env import KinematicCarEnv
 #     ),
 # )
 
-# # 二输入小车 ddpg, ppo
+# # 二输入小车 ddpg
 register(
     id="KinematicCar-v0",
     entry_point="kinodynamic_car_SB3.dubins_env:KinematicCarEnv",
