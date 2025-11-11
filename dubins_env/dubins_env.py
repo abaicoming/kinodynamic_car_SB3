@@ -58,7 +58,7 @@ class KinematicCarEnv(gym.Env):
         obs_margin: float = 0.5,
         obs_power: float = 2.0,
 
-        input_mode:str = "old_input", # ["old_input", "new_input"]
+        input_mode:str = "new_input", # ["old_input", "new_input"]
         fixed_goal_flag: bool = False,
         fixed_goal:Tuple[float,float,float] = (1.5,0,0)
     ):
@@ -97,12 +97,6 @@ class KinematicCarEnv(gym.Env):
         self.input_mode = str(input_mode)
         self.fixed_goal_flag = fixed_goal_flag  # 控制目标是否固定
         self.fixed_goal = fixed_goal
-        # 价值锚定
-        self.goal_anchor_prob = 0.05   # 5% 的回合做一次“价值锚定”微回合
-        self._absorb_goal_pending = False   # 告诉 step：下一步进入“目标吸收步”
-
-
-
 
         # 动作/观测空间
         self.action_space = spaces.Box(low=np.array([-1.0, -1.0], np.float32),
@@ -235,9 +229,7 @@ class KinematicCarEnv(gym.Env):
             goal  = self._forced_goal  if self._forced_goal  is not None else goal
             self._forced_start = None
             self._forced_goal = None
-        
-        flag_plot = 0
-        
+
         if start is None or goal is None:
             if self.fixed_goal_flag:
                 while True:
@@ -258,7 +250,6 @@ class KinematicCarEnv(gym.Env):
             gx, gy, gth = goal
             self.state = (float(sx), float(sy), float(sth))
             self.goal  = (float(gx), float(gy), float(gth))
-            flag_plot = 1
 
         # 确保起终点不在障碍物内（不强制 safe_margin）
         ox, oy = self.obstacle_center
@@ -271,64 +262,14 @@ class KinematicCarEnv(gym.Env):
                     self.state, self.goal = st, gl
                     break
 
-        # 这里确保 state / goal 均有效
         self._elapsed_steps = 0
         self.u0 = 0.0; self.u1 = 0.0
-        self._prev_dist = None
-        self._pos_bonus_given = False
-
-        # reset() 里，在已确定 state/goal 之后、obs 之前：
-        if not self.fixed_goal_flag:
-            if (self.np_random.random() < 0.5) and (flag_plot==0):  # 50% 近距课程
-                # 以当前起点为圆心，采一个近距离目标（避开障碍）
-                r = self.np_random.uniform(1.0, 2.5)
-                ang = self.np_random.uniform(-math.pi, math.pi)
-                ox, oy = self.obstacle_center
-                gx = self.state[0] + r * math.cos(ang)
-                gy = self.state[1] + r * math.sin(ang)
-                # 简单投影出障碍
-                d = math.hypot(gx - ox, gy - oy)
-                R = self.obstacle_radius + self.safe_margin + 1e-3
-                if d < R:
-                    scale = R / max(d, 1e-6)
-                    gx = ox + (gx - ox) * scale
-                    gy = oy + (gy - oy) * scale
-                gth = self.np_random.uniform(self.goal_theta_range[0], self.goal_theta_range[1])
-                self.goal = (gx, gy, gth)
-
-        # 以小概率做“价值锚定”：起点直接放到目标，并让下一步成为“零回报吸收步”
-        if (self.np_random.random() < self.goal_anchor_prob) and (flag_plot==0):
-            self.state = self.goal
-            self._absorb_goal_pending = True
-        else:
-            self._absorb_goal_pending = False
-        
+        # print(self.state)
+        # print(self.goal)
         obs = self._get_obs()
         return obs, {}
 
     def step(self, action: np.ndarray):
-        # 记录上一步距离
-        if not hasattr(self, "_prev_dist"):
-            self._prev_dist = None
-
-        # --- 目标吸收步：观测=目标态，奖励=0，本步直接终止 ---
-        if self._absorb_goal_pending:
-            # 不再改变状态；此时 self.state 已等于 goal
-            obs = self._get_obs()           # 这里的 obs 就是 “x≈xg, y≈yg, θ≈θg”
-            info = {
-                "dist": 0.0, "dtheta": 0.0,
-                "u0": 0.0, "u1": 0.0,
-                "is_success": True, "success": True,
-                "pos_ok": True, "yaw_ok": True,
-                "is_collision": False,
-                "state": (float(self.state[0]), float(self.state[1]), float(self.state[2])),
-                "terminal_state": (float(self.state[0]), float(self.state[1]), float(self.state[2])),
-                "absorbing_goal": True,
-            }
-            self._absorb_goal_pending = False
-            # 注意：这里直接终止；不给任何 shaping/步惩罚，确保 TD 目标就是 0
-            return obs, 0.0, True, False, info
-
         self._elapsed_steps += 1
 
         action = np.asarray(action, dtype=np.float32).reshape(-1)
@@ -349,27 +290,12 @@ class KinematicCarEnv(gym.Env):
         self.state = (x, y, th)
 
         dist, dth = self._distance_and_heading()
-
-        # ---- progress 奖励 ----
-        progress = 0.0
-        if self._prev_dist is not None:
-            progress = self._prev_dist - dist    # 变小为正奖励
-        self._prev_dist = dist
-        # reward = (
-        #     - self.w_dist * dist
-        #     - self.w_yaw * dth
-        #     - self.w_u_v * (u0**2)
-        #     - self.w_u_steer * (u1**2)
-        # )
-        # new reward
-        progress_gain = 2.0     # ↑从 0.8 提到 2.0（先试 1.5~3.0）
-        step_penalty  = 0.01    # ↓从 0.05 降到 0.01 或干脆 0
         reward = (
-            + progress_gain * progress       # ✅ 朝目标进步
+            - self.w_dist * dist
+            - self.w_yaw * dth
             - self.w_u_v * (u0**2)
             - self.w_u_steer * (u1**2)
-            - step_penalty            # 轻步惩罚（不要太大）
-            )
+        )
 
         # 避障 shaping
         d_obs = self._dist_to_obstacle()
@@ -388,37 +314,20 @@ class KinematicCarEnv(gym.Env):
                 shaping = - lam * 10.0
         elif self.obs_shaping_type == "reciprocal":
             shaping = - lam / ((max(clearance, 1e-3)) ** self.obs_power)
-        elif self.obs_shaping_type == "ntfields":
-            if clearance <= self.obs_margin:
-                shaping = -self.w_obs_shaping * np.clip(1.0 / max(clearance, 1e-5), 1.0, 10.0) + 1  # 上限 10 只是示例
-            else:
-                shaping = 0.0
         else:
             shaping = 0.0
-        
         reward += shaping
-
-        if not getattr(self, "_pos_bonus_given", False) and self._goal_pos_ok():
-            reward += 30.0            # 可调：20~50
-            self._pos_bonus_given = True
 
         pos_ok = self._goal_pos_ok()
         yaw_ok = self._goal_yaw_ok()
         is_goal = self._goal_reached()
         is_collision = self._collided()
 
-        if is_goal:
-            reward += self.w_goal               # 该步照常给达成奖励
-            self._absorb_goal_pending = True    # ✅ 下一步做“零回报吸收终止”
+        if is_goal:      reward += self.w_goal
         if is_collision: reward -= self.w_collision
 
-        terminated = bool(is_collision)
+        terminated = bool(is_goal or is_collision)
         truncated  = self._elapsed_steps >= self.max_episode_steps
-
-        # 如果这步到达了目标，为了保证下一步还能走出“吸收终止”，
-        # 可以放宽一次截断（可选，但推荐）
-        if is_goal and truncated:
-            truncated = False
 
         obs = self._get_obs()
         state_tuple = (float(self.state[0]), float(self.state[1]), float(self.state[2]))

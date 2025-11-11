@@ -8,6 +8,7 @@ import gymnasium as gym
 import torch
 from matplotlib.patches import Circle
 import matplotlib.cm as cm
+import math
 
 # ===== SB3 / Contrib =====
 from stable_baselines3 import DDPG, TD3, SAC, PPO
@@ -272,6 +273,46 @@ def make_start_goals_in_box(
 
     return [ (s, goal_pose) for s in starts ]
 
+def make_random_start_goal_pairs(
+    n: int,
+    seed: int = 42,
+    env_id: str = ENV_ID,
+):
+    """
+    随机采样 n 组 (start, goal)，两者都随机，且：
+      - 起/终点不在障碍物内
+      - 起终点相距 >= min_start_goal_dist
+    采样范围直接从环境的 xy/theta 配置里读取，保证一致。
+    """
+    tmp_env = gym.make(env_id).unwrapped
+    rng = np.random.default_rng(seed)
+
+    sxr = tmp_env.xy_range
+    gxr = tmp_env.goal_xy_range
+    sthr = tmp_env.theta_range
+    gthr = tmp_env.goal_theta_range
+    min_d = float(tmp_env.min_start_goal_dist)
+    (ox, oy) = tmp_env.obstacle_center
+    orad = float(tmp_env.obstacle_radius)
+
+    def _safe_pose(xr, thr):
+        while True:
+            x = rng.uniform(xr[0], xr[1])
+            y = rng.uniform(xr[0], xr[1])
+            th = rng.uniform(thr[0], thr[1])
+            if math.hypot(x - ox, y - oy) > orad:  # 不在障碍物内
+                return (float(x), float(y), float(th))
+
+    pairs = []
+    while len(pairs) < n:
+        s = _safe_pose(sxr, sthr)
+        g = _safe_pose(gxr, gthr)
+        if math.hypot(g[0] - s[0], g[1] - s[1]) >= min_d:
+            pairs.append((s, g))
+
+    tmp_env.close()
+    return pairs
+
 # ============ 轨迹可视化（可单独调用） ============
 def visualize_trajectories(
     log_dir: str,
@@ -434,12 +475,11 @@ def train_and_optionally_eval(args):
     algo_kwargs = dict(
         policy="MlpPolicy",
         env=venv,
-        device="cuda" if torch.cuda.is_available() else "cpu",
+        device= 1  if torch.cuda.is_available() else "cpu",
         tensorboard_log=LOG_DIR,
         seed=SEED,
         verbose=2,
-        policy_kwargs=dict(net_arch=[256, 256], use_sde=True),
-
+        policy_kwargs=pk,
     )
 
     if ALG in ["ddpg", "td3"]:
@@ -456,29 +496,20 @@ def train_and_optionally_eval(args):
         ))
     elif ALG == "ppo":
         algo_kwargs.update(dict(
-            verbose=2,
-            learning_rate=3e-4,
-            n_steps=256,
-            batch_size=128,
-            n_epochs=10,
-            gamma=0.995,
+            verbose=1,  
+            learning_rate=2.5e-4,
+            n_steps=512,  # 每个环境步骤
+            batch_size=64,
+            n_epochs=10,   # 每次更新多少次
+            gamma=0.99,
             gae_lambda=0.95,
-            ent_coef=0.005,
-            vf_coef=0.5,
+            ent_coef=0.0,   # 熵系数，控制探索
+            vf_coef=0.5,    # 价值函数的损失权重
             max_grad_norm=0.5,
-            clip_range=0.15,
-            target_kl=0.03,
-
-            # ✅ 只在顶层传 use_sde；不要在 policy_kwargs 再写一次
-            use_sde=True,
-            sde_sample_freq=4,
-
-            # ✅ policy_kwargs 里不要含 use_sde
-            policy_kwargs=dict(net_arch=[256, 256]),
-
+            clip_range=0.2, # PPO的剪切范围
             tensorboard_log=LOG_DIR,
+            policy_kwargs=pk,
         ))
-
     elif ALG == "sac":
         algo_kwargs.update(dict(
             verbose=1,
@@ -577,9 +608,9 @@ def parse_args():
     p.add_argument("--log-dir", type=str,
                    default="/workspace/kinodynamic_car_SB3/backup/with_obstacle_avoidance_v7/0",
                    help="保存/读取模型的目录")
-    p.add_argument("--n-envs", type=int, default=32, help="并行环境个数")
-    p.add_argument("--eval-envs", type=int, default=16, help="评估并行环境个数")
-    p.add_argument("--total-steps", type=int, default=3000_000, help="训练总步数")
+    p.add_argument("--n-envs", type=int, default=64, help="并行环境个数")
+    p.add_argument("--eval-envs", type=int, default=64, help="评估并行环境个数")
+    p.add_argument("--total-steps", type=int, default=15000_000, help="训练总步数")
 
     # 轨迹图参数
     p.add_argument("--episodes", type=int, default=16, help="可视化的轨迹条数")
@@ -598,6 +629,7 @@ def parse_args():
     p.add_argument("--n-samples", type=int, default=120, help="random: 总样本数")
     p.add_argument("--sample-seed", type=int, default=42, help="random: 采样随机种子")
     p.add_argument("--save-samples", action="store_true", help="是否把采样的起点集合保存成 npz")
+    p.add_argument("--fixed-goal", action="store_true", help="输入时不画图2和3,否则画")
 
     return p.parse_args()
 
@@ -657,69 +689,98 @@ if __name__ == "__main__":
     #     )
 
     if args.mode in ["plot", "train_and_plot"]:
+        # ---- 图1：固定终点 + 多起点（原逻辑）----
+        fixed_goal_pose = _parse_triplet(args.goal)  # 用命令行 --goal 或默认 "1.5,0,0"
+
         if args.sample_mode == "specified":
-            # 示例：批量指定若干起终点
-            starts_goals = [
-                ((-4.0,  0.1, 0.0), ( 1.5, 0.0, 0.0)),
-                ((-4.0, -0.1, 0.0), ( 1.5, 0.0, 0.0)),
-                ((-4.0,  0.5, 0.0), ( 1.5, 0.0, 0.0)),
-                ((-4.0, -0.5, 0.0), ( 1.5, 0.0, 0.0)),
-                ((-4.0,  1.0, 0.0), ( 1.5, 0.0, 0.0)),
-                ((-4.0, -1.0, 0.0), ( 1.5, 0.0, 0.0)),
+            starts_goals_fig1 = [
+                ((-4.0,  0.1, 0.0), (fixed_goal_pose)),
+                ((-4.0, -0.1, 0.0), (fixed_goal_pose)),
+                ((-4.0,  0.5, 0.0), (fixed_goal_pose)),
+                ((-4.0, -0.5, 0.0), (fixed_goal_pose)),
+                ((-4.0,  1.0, 0.0), (fixed_goal_pose)),
+                ((-4.0, -1.0, 0.0), (fixed_goal_pose)),
             ]
-            visualize_trajectories(
-                log_dir=args.log_dir,
-                alg_name=args.alg,
-                max_steps=args.max_steps,
-                deterministic=args.deterministic,
-                title_suffix=args.mode,
-                start_goals=starts_goals,
-                episodes=len(starts_goals),
-                # 或直接用固定起终点：
-                # start_pose=(-4.0, -4.0, 0.0),
-                # goal_pose=(2.0, 1.5, 0.0),
-            )
         else:
-            # 1) 解析盒子
+            # 用 box 采样多起点（grid 或 random），终点固定
             (xlo,xhi), (ylo,yhi), (thlo,thhi) = _parse_box6(args.box)
-
-            # 2) 目标点：用 contour 的 --goal 或默认
-            goal_pose = _parse_triplet(args.goal)  # 你现在的 --goal 仍是 "xg,yg,thg" 字符串
-
-            # 3) 采样
-            starts_goals = make_start_goals_in_box(
+            starts_goals_fig1 = make_start_goals_in_box(
                 x_range=(xlo,xhi),
                 y_range=(ylo,yhi),
                 th_range=(thlo,thhi),
-                goal_pose=goal_pose,
-                mode=args.sample_mode,
+                goal_pose=fixed_goal_pose,
+                mode=args.sample_mode,          # "grid" 或 "random"
                 nx=args.nx, ny=args.ny, nth=args.nth,
                 n_samples=args.n_samples,
                 seed=args.sample_seed,
             )
 
-            # 4) 可选保存，便于和别的方法复现实验 & 共用同一批起点
-            if args.save_samples:
-                os.makedirs(os.path.join(args.log_dir, "eval_sets"), exist_ok=True)
-                out_npz = os.path.join(args.log_dir, "eval_sets",
-                                    f"starts_{args.sample_mode}_seed{args.sample_seed}.npz")
-                np.savez_compressed(out_npz, starts_goals=starts_goals,
-                                    x_range=(xlo,xhi), y_range=(ylo,yhi), th_range=(thlo,thhi),
-                                    goal=goal_pose, mode=args.sample_mode,
-                                    nx=args.nx, ny=args.ny, nth=args.nth,
-                                    n_samples=args.n_samples)
-                print(f"[evalset] saved to {out_npz}")
+        visualize_trajectories(
+            log_dir=args.log_dir,
+            alg_name=args.alg,
+            max_steps=args.max_steps,
+            deterministic=args.deterministic,
+            title_suffix="fig1_fixed_goal_multi_starts",
+            start_goals=starts_goals_fig1,
+            episodes=min(len(starts_goals_fig1), args.episodes),
+        )
 
-            # 5) 作图
+        # 可选保存
+        if args.save_samples:
+            os.makedirs(os.path.join(args.log_dir, "eval_sets"), exist_ok=True)
+            np.savez_compressed(
+                os.path.join(args.log_dir, "eval_sets", f"fig1_fixed_goal_starts_seed{args.sample_seed}.npz"),
+                starts_goals=starts_goals_fig1
+            )
+        if not args.fixed_goal:
+        # ---- 图2：随机起点 + 随机终点（新增）----
+            starts_goals_fig2 = make_random_start_goal_pairs(
+                n=args.episodes,
+                seed=args.sample_seed,
+                env_id=ENV_ID,
+            )
             visualize_trajectories(
                 log_dir=args.log_dir,
                 alg_name=args.alg,
                 max_steps=args.max_steps,
                 deterministic=args.deterministic,
-                title_suffix=args.mode,
-                start_goals=starts_goals,
-                episodes=len(starts_goals),
+                title_suffix="fig2_random_start_and_goal",
+                start_goals=starts_goals_fig2,
+                episodes=len(starts_goals_fig2),
             )
+            if args.save_samples:
+                np.savez_compressed(
+                    os.path.join(args.log_dir, "eval_sets", f"fig2_rand_start_goal_seed{args.sample_seed}.npz"),
+                    starts_goals=starts_goals_fig2
+                )
+
+            # ---- 图3：固定终点 + 随机起点（新增）----
+            # 用 box 的范围随机采样起点，终点固定为 fixed_goal_pose
+            (xlo,xhi), (ylo,yhi), (thlo,thhi) = _parse_box6(args.box)
+            starts_goals_fig3 = make_start_goals_in_box(
+                x_range=(xlo,xhi),
+                y_range=(ylo,yhi),
+                th_range=(thlo,thhi),
+                goal_pose=fixed_goal_pose,
+                mode="random",
+                n_samples=args.episodes,
+                seed=args.sample_seed,
+            )
+            visualize_trajectories(
+                log_dir=args.log_dir,
+                alg_name=args.alg,
+                max_steps=args.max_steps,
+                deterministic=args.deterministic,
+                title_suffix="fig3_fixed_goal_random_starts",
+                start_goals=starts_goals_fig3,
+                episodes=len(starts_goals_fig3),
+            )
+            if args.save_samples:
+                np.savez_compressed(
+                    os.path.join(args.log_dir, "eval_sets", f"fig3_fixed_goal_rand_starts_seed{args.sample_seed}.npz"),
+                    starts_goals=starts_goals_fig3
+                )
+
 
 
     if args.mode in ["contour", "train_and_plot"]:

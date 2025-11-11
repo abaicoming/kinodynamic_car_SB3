@@ -29,7 +29,7 @@ sudo docker run -it \
   -v /home/ac/data/xlh/KINODYNAMIC:/workspace \
   -v /usr/lib/x86_64-linux-gnu/:/glu \
   -v /home/n/.local:/.local \
-  --name sb3_test1 \
+  --name sb3_test3 \
   -w /workspace \
   --user $(id -u):$(id -g) \
   stable-baselines3-ready:latest
